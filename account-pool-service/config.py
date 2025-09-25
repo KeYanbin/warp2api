@@ -20,9 +20,9 @@ class Config:
     DATABASE_PATH = os.getenv("DATABASE_PATH", "accounts.db")
     
     # 号池配置
-    MIN_POOL_SIZE = int(os.getenv("MIN_POOL_SIZE", 50))  # 最少维持5个账号
-    MAX_POOL_SIZE = int(os.getenv("MAX_POOL_SIZE", 100))  # 最大储备50个账号
-    ACCOUNTS_PER_REQUEST = int(os.getenv("ACCOUNTS_PER_REQUEST", 1))  # 每个请求分配1个账号
+    MIN_POOL_SIZE = int(os.getenv("MIN_POOL_SIZE", 5))  # 最少维持5个账号
+    MAX_POOL_SIZE = int(os.getenv("MAX_POOL_SIZE", 9999))  # 最大储备50个账号
+    ACCOUNTS_PER_REQUEST = int(os.getenv("ACCOUNTS_PER_REQUEST", 5))  # 每个请求分配1个账号
     
     # 注册器配置
     BATCH_REGISTER_SIZE = int(os.getenv("BATCH_REGISTER_SIZE", 10))  # 每次批量注册10个账号

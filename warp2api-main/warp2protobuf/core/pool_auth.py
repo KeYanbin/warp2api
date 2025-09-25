@@ -20,6 +20,7 @@ from .auth import decode_jwt_payload, is_token_expired, update_env_file
 # 账号池服务配置
 POOL_SERVICE_URL = os.getenv("POOL_SERVICE_URL", "http://localhost:8019")
 USE_POOL_SERVICE = os.getenv("USE_POOL_SERVICE", "true").lower() == "true"
+ACCOUNTS_PER_REQUEST = int(os.getenv("ACCOUNTS_PER_REQUEST", 1))  # 每个请求分配的账号数
 
 # 全局账号信息
 _current_session: Optional[Dict[str, Any]] = None
@@ -32,7 +33,9 @@ class PoolAuthManager:
     def __init__(self):
         self.pool_url = POOL_SERVICE_URL
         self.current_session_id = None
-        self.current_account = None
+        self.current_account = None  # 当前使用的账号
+        self.accounts = []  # 所有分配的账号列表
+        self.account_index = 0  # 当前账号索引
         self.access_token = None
         
     async def acquire_pool_access_token(self) -> str:
@@ -55,10 +58,10 @@ class PoolAuthManager:
             
             # 从账号池分配新账号
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-                # 分配账号
+                # 分配账号（根据配置数量）
                 response = await client.post(
                     f"{self.pool_url}/api/accounts/allocate",
-                    json={"count": 1}
+                    json={"count": ACCOUNTS_PER_REQUEST}
                 )
                 
                 if response.status_code != 200:
@@ -72,26 +75,30 @@ class PoolAuthManager:
                 accounts = data.get("accounts", [])
                 if not accounts:
                     raise RuntimeError("未获得任何账号")
-                
-                account = accounts[0]
+
                 session_id = data.get("session_id")
-                
-                logger.info(f"成功获得账号: {account['email']}, 会话: {session_id}")
-                
-                # 获取访问令牌
-                access_token = await self._get_access_token_from_account(account)
-                
+                logger.info(f"成功获得 {len(accounts)} 个账号, 会话: {session_id}")
+
+                # 保存所有账号
+                self.accounts = accounts
+                self.account_index = 0
+                self.current_account = accounts[0]
+
+                # 获取第一个账号的访问令牌
+                access_token = await self._get_access_token_from_account(self.current_account)
+
                 # 保存会话信息
                 with _session_lock:
                     _current_session = {
                         "session_id": session_id,
-                        "account": account,
+                        "accounts": accounts,  # 保存所有账号
+                        "account": self.current_account,  # 当前使用的账号
+                        "account_index": 0,  # 当前账号索引
                         "access_token": access_token,
                         "created_at": time.time()
                     }
-                
+
                 self.current_session_id = session_id
-                self.current_account = account
                 self.access_token = access_token
                 
                 # 更新环境变量（兼容现有代码）
@@ -162,22 +169,22 @@ class PoolAuthManager:
     def _is_session_valid(self, session: Dict[str, Any]) -> bool:
         """
         检查会话是否有效
-        
+
         Args:
             session: 会话信息
-            
+
         Returns:
             是否有效
         """
         # 检查会话是否过期（30分钟）
         if time.time() - session.get("created_at", 0) > 1800:
             return False
-        
+
         # 检查token是否过期
         access_token = session.get("access_token")
         if not access_token:
             return False
-        
+
         # 尝试解码JWT检查过期
         try:
             if is_token_expired(access_token):
@@ -192,28 +199,34 @@ class PoolAuthManager:
                         return False
                 except:
                     pass
-        
+
+        # 恢复账号列表和索引
+        self.accounts = session.get("accounts", [])
+        self.account_index = session.get("account_index", 0)
+        if self.accounts and self.account_index < len(self.accounts):
+            self.current_account = self.accounts[self.account_index]
+
         return True
     
     async def mark_current_account_quota_exhausted(self):
-        """标记当前账号配额用尽"""
+        """标记当前账号配额用尽并尝试切换到下一个账号"""
         global _current_session
-        
+
         with _session_lock:
             if not _current_session:
                 logger.warning("没有当前会话，无法标记配额用尽")
                 return False
-            
+
             account = _current_session.get("account")
             if not account:
                 return False
-            
+
             email = account.get("email")
             if not email:
                 return False
-        
+
         logger.warning(f"🚫 标记账号 {email} 的配额已用尽")
-        
+
         try:
             # 通知账号池服务标记账号配额用尽
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
@@ -221,22 +234,80 @@ class PoolAuthManager:
                     f"{self.pool_url}/api/accounts/mark_quota_exhausted",
                     json={"email": email}
                 )
-                
+
                 if response.status_code == 200:
                     logger.info(f"成功标记账号 {email} 配额用尽")
-                    # 清除当前会话
-                    _current_session = None
-                    self.current_session_id = None
-                    self.current_account = None
-                    self.access_token = None
-                    return True
+
+                    # 尝试切换到下一个账号
+                    success = await self._switch_to_next_account()
+                    if success:
+                        logger.info(f"✅ 成功切换到下一个账号")
+                        return True
+                    else:
+                        logger.warning(f"⚠️ 所有账号已用尽，清除会话")
+                        # 所有账号都用尽，清除当前会话
+                        _current_session = None
+                        self.current_session_id = None
+                        self.current_account = None
+                        self.accounts = []
+                        self.account_index = 0
+                        self.access_token = None
+                        return True
                 else:
                     logger.error(f"标记配额用尽失败: {response.status_code} {response.text}")
                     return False
-                    
+
         except Exception as e:
             logger.error(f"标记配额用尽异常: {e}")
             return False
+
+    async def _switch_to_next_account(self) -> bool:
+        """
+        切换到下一个可用账号
+
+        Returns:
+            是否成功切换
+        """
+        global _current_session
+
+        with _session_lock:
+            if not _current_session:
+                return False
+
+            accounts = _current_session.get("accounts", [])
+            current_index = _current_session.get("account_index", 0)
+
+            # 检查是否还有下一个账号
+            next_index = current_index + 1
+            if next_index >= len(accounts):
+                logger.info(f"没有更多账号可切换（当前索引: {current_index}, 总数: {len(accounts)}）")
+                return False
+
+            # 切换到下一个账号
+            next_account = accounts[next_index]
+            logger.info(f"切换到账号 [{next_index+1}/{len(accounts)}]: {next_account.get('email')}")
+
+            try:
+                # 获取新账号的访问令牌
+                access_token = await self._get_access_token_from_account(next_account)
+
+                # 更新会话信息
+                _current_session["account"] = next_account
+                _current_session["account_index"] = next_index
+                _current_session["access_token"] = access_token
+
+                # 更新实例变量
+                self.current_account = next_account
+                self.account_index = next_index
+                self.access_token = access_token
+
+                # 更新环境变量
+                update_env_file(access_token)
+
+                return True
+            except Exception as e:
+                logger.error(f"切换账号失败: {e}")
+                return False
     
     async def release_current_session(self):
         """释放当前会话"""
@@ -270,6 +341,8 @@ class PoolAuthManager:
                 _current_session = None
                 self.current_session_id = None
                 self.current_account = None
+                self.accounts = []
+                self.account_index = 0
                 self.access_token = None
 
 
@@ -340,11 +413,16 @@ def get_current_account_info() -> Optional[Dict[str, Any]]:
     with _session_lock:
         if _current_session:
             account = _current_session.get("account")
+            accounts = _current_session.get("accounts", [])
+            index = _current_session.get("account_index", 0)
             if account:
                 return {
                     "email": account.get("email"),
                     "uid": account.get("local_id"),
                     "session_id": _current_session.get("session_id"),
-                    "created_at": _current_session.get("created_at")
+                    "created_at": _current_session.get("created_at"),
+                    "account_index": index,
+                    "total_accounts": len(accounts),
+                    "accounts_info": f"[{index+1}/{len(accounts)}]"
                 }
     return None
