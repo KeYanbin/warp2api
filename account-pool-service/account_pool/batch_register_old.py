@@ -921,7 +921,12 @@ class BatchRegister:
             }
     
     def _get_request_limit(self, id_token: str, thread_id: int = None) -> Dict[str, Any]:
-        """获取账户请求额度"""
+        """获取账户请求额度
+        
+        调用 GetUser 接口获取账户信息，通过 billingMetadata 判断额度
+        billingMetadata 为 null → 150 额度
+        billingMetadata 不为 null → 2500 额度
+        """
         if not thread_id:
             thread_id = threading.get_ident()
             
@@ -931,18 +936,21 @@ class BatchRegister:
         try:
             url = "https://app.warp.dev/graphql/v2"
             
+            # billingMetadata 是对象类型，需要查询子字段
             query = """
             query GetUser($requestContext: RequestContext!) {
               user(requestContext: $requestContext) {
                 __typename
                 ... on UserOutput {
                   user {
-                    requestLimitInfo {
-                      requestLimit
-                      requestsUsedSinceLastRefresh
-                      nextRefreshTime
-                      isUnlimited
+                    billingMetadata {
+                      __typename
                     }
+                    profile {
+                      email
+                      uid
+                    }
+                    isOnboarded
                   }
                 }
                 ... on UserFacingError {
@@ -955,16 +963,17 @@ class BatchRegister:
             """
             
             import platform
-            os_name = platform.system()
-            os_version = platform.release()
-            os_category = "Desktop"
+            import uuid
+            os_name = "Windows"
+            os_version = "10 (19045)"
+            os_category = "Windows"
             
             data = {
                 "operationName": "GetUser",
                 "variables": {
                     "requestContext": {
                         "clientContext": {
-                            "version": "v0.2025.08.27.08.11.stable_04"
+                            "version": "v0.2025.09.10.08.11.stable_01"
                         },
                         "osContext": {
                             "category": os_category,
@@ -979,11 +988,13 @@ class BatchRegister:
             
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {id_token}",
+                "authorization": f"Bearer {id_token}",
                 "User-Agent": self._generate_warp_user_agent(),
-                "X-warp-client-version": "v0.2025.08.27.08.11.stable_04",
-                "X-warp-os-category": "Desktop",
-                "X-warp-manager-request": "true"
+                "x-warp-client-version": "v0.2025.09.10.08.11.stable_01",
+                "x-warp-os-category": "Windows",
+                "x-warp-os-name": "Windows",
+                "x-warp-os-version": "10 (19045)",
+                "X-warp-experiment-id": str(uuid.uuid4())
             }
             
             print(f"  📊 [线程{thread_id}] 获取账户额度信息...")
@@ -1009,24 +1020,31 @@ class BatchRegister:
                 
                 if user_data.get("__typename") == "UserOutput":
                     user_info = user_data.get("user", {})
-                    limit_info = user_info.get("requestLimitInfo", {})
+                    billing_metadata = user_info.get("billingMetadata")
+                    profile = user_info.get("profile", {})
                     
-                    if limit_info:
-                        request_limit = limit_info.get("requestLimit")
-                        requests_used = limit_info.get("requestsUsedSinceLastRefresh", 0)
-                        
-                        print(f"  ✅ [线程{thread_id}] 账户额度: {request_limit} (已用: {requests_used})")
-                        
-                        return {
-                            "success": True,
-                            "requestLimit": request_limit,
-                            "requestsUsed": requests_used
-                        }
+                    # 根据 billingMetadata 判断额度
+                    if billing_metadata is None:
+                        request_limit = 150
+                        quota_type = "📋 普通额度"
+                    else:
+                        request_limit = 2500
+                        quota_type = "🎉 高额度"
+                    
+                    email = profile.get("email", "N/A")
+                    
+                    print(f"  ✅ [线程{thread_id}] {quota_type}: {request_limit} (邮箱: {email})")
+                    
+                    return {
+                        "success": True,
+                        "requestLimit": request_limit,
+                        "quotaType": "high" if request_limit == 2500 else "normal"
+                    }
                 elif user_data.get("__typename") == "UserFacingError":
                     error = user_data.get("error", {}).get("message", "Unknown error")
                     return {"success": False, "error": error}
                 else:
-                    return {"success": False, "error": "未找到额度信息"}
+                    return {"success": False, "error": "未找到用户信息"}
             else:
                 return {"success": False, "error": f"HTTP {response.status_code}"}
                 

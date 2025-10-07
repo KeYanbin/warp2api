@@ -32,6 +32,7 @@ class Account:
     use_count: int = 0
     session_id: Optional[str] = None  # 用于并发请求的会话标识
     quota_exhausted_at: Optional[datetime] = None  # 配额用尽时间
+    quota_type: int = 150  # 配额类型：150 或 2500
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -47,7 +48,8 @@ class Account:
             'last_refresh_time': self.last_refresh_time.isoformat() if self.last_refresh_time else None,
             'use_count': self.use_count,
             'session_id': self.session_id,
-            'quota_exhausted_at': self.quota_exhausted_at.isoformat() if self.quota_exhausted_at else None
+            'quota_exhausted_at': self.quota_exhausted_at.isoformat() if self.quota_exhausted_at else None,
+            'quota_type': self.quota_type
         }
 
 
@@ -114,9 +116,9 @@ class AccountDatabase:
                 cursor.execute('ALTER TABLE accounts ADD COLUMN quota_exhausted_at TIMESTAMP')
                 logger.info("数据库升级：添加quota_exhausted_at字段")
             
-            if 'quota_exhausted_at' not in columns:
-                cursor.execute('ALTER TABLE accounts ADD COLUMN quota_exhausted_at TIMESTAMP')
-                logger.info("数据库升级：添加quota_exhausted_at字段")
+            if 'quota_type' not in columns:
+                cursor.execute('ALTER TABLE accounts ADD COLUMN quota_type INTEGER DEFAULT 150')
+                logger.info("数据库升级：添加quota_type字段")
             
             # 创建索引优化查询性能
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_status ON accounts (status)')
@@ -130,18 +132,19 @@ class AccountDatabase:
         try:
             with self._get_cursor() as cursor:
                 cursor.execute('''
-                    INSERT INTO accounts (email, local_id, id_token, refresh_token, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO accounts (email, local_id, id_token, refresh_token, status, created_at, quota_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     account.email,
                     account.local_id,
                     account.id_token,
                     account.refresh_token,
                     account.status,
-                    datetime.now()
+                    datetime.now(),
+                    account.quota_type
                 ))
                 cursor.connection.commit()
-                logger.info(f"成功添加账号到数据库: {account.email}")
+                logger.info(f"成功添加账号到数据库: {account.email} (配额: {account.quota_type})")
                 return True
         except sqlite3.IntegrityError as e:
             logger.warning(f"账号已存在，跳过添加: {account.email}")
@@ -177,7 +180,8 @@ class AccountDatabase:
                     last_used=datetime.fromisoformat(row['last_used']) if row['last_used'] else None,
                     last_refresh_time=datetime.fromisoformat(row['last_refresh_time']) if row['last_refresh_time'] else None,
                     use_count=row['use_count'] or 0,
-                    session_id=row['session_id']
+                    session_id=row['session_id'],
+                    quota_type=row['quota_type'] if 'quota_type' in row.keys() else 150
                 )
                 accounts.append(account)
             
@@ -238,7 +242,8 @@ class AccountDatabase:
                         last_used=datetime.fromisoformat(row['last_used']) if row['last_used'] else None,
                         last_refresh_time=datetime.fromisoformat(row['last_refresh_time']) if row['last_refresh_time'] else None,
                         use_count=row['use_count'] or 0,
-                        session_id=row['session_id']
+                        session_id=row['session_id'],
+                        quota_type=row['quota_type'] if 'quota_type' in row.keys() else 150
                     )
                     accounts.append(account)
                 
@@ -407,7 +412,8 @@ class AccountDatabase:
                     last_used=datetime.fromisoformat(row['last_used']) if row['last_used'] else None,
                     last_refresh_time=datetime.fromisoformat(row['last_refresh_time']) if row['last_refresh_time'] else None,
                     use_count=row['use_count'] or 0,
-                    session_id=row['session_id']
+                    session_id=row['session_id'],
+                    quota_type=row['quota_type'] if 'quota_type' in row.keys() else 150
                 )
         except Exception as e:
             logger.error(f"获取账号信息失败: {e}")

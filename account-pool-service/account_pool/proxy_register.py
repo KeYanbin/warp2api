@@ -906,7 +906,9 @@ class ProxyRegistration:
     def _get_request_limit(self, id_token: str) -> Dict[str, Any]:
         """获取账户请求额度
         
-        调用 GetRequestLimitInfo 接口获取账户的使用限制信息
+        调用 GetUser 接口获取账户信息，通过 billingMetadata 判断额度
+        billingMetadata 为 null → 150 额度
+        billingMetadata 不为 null → 2500 额度
         
         Args:
             id_token: Firebase ID Token
@@ -918,22 +920,25 @@ class ProxyRegistration:
             return {"success": False, "error": "缺少Firebase ID Token"}
             
         try:
-            import platform
+            import uuid
             url = "https://app.warp.dev/graphql/v2"
             
-            # 正确的查询结构：通过 user.requestLimitInfo 嵌套获取
+            # 查询结构：获取 billingMetadata 来判断额度
+            # billingMetadata 是对象类型，需要查询子字段
             query = """
             query GetUser($requestContext: RequestContext!) {
               user(requestContext: $requestContext) {
                 __typename
                 ... on UserOutput {
                   user {
-                    requestLimitInfo {
-                      requestLimit
-                      requestsUsedSinceLastRefresh
-                      nextRefreshTime
-                      isUnlimited
+                    billingMetadata {
+                      __typename
                     }
+                    profile {
+                      email
+                      uid
+                    }
+                    isOnboarded
                   }
                 }
                 ... on UserFacingError {
@@ -946,16 +951,17 @@ class ProxyRegistration:
             """
             
             # 获取 OS 信息
-            os_name = platform.system()
-            os_version = platform.release()
-            os_category = "Desktop"
+            import uuid
+            os_name = "Windows"
+            os_version = "10 (19045)"
+            os_category = "Windows"
             
             data = {
                 "operationName": "GetUser",
                 "variables": {
                     "requestContext": {
                         "clientContext": {
-                            "version": "v0.2025.08.27.08.11.stable_04"
+                            "version": "v0.2025.09.10.08.11.stable_01"
                         },
                         "osContext": {
                             "category": os_category,
@@ -969,11 +975,12 @@ class ProxyRegistration:
             }
             
             headers = self._generate_random_headers()
-            headers["Authorization"] = f"Bearer {id_token}"
-            headers["X-Warp-Client-Version"] = "v0.2025.09.03.08.11.stable_03"
-            headers["X-Warp-Os-Category"] = "Windows"
-            headers["X-Warp-Os-Name"] = "Windows"
-            headers["X-Warp-Os-Version"] = "10 (19045)"
+            headers["authorization"] = f"Bearer {id_token}"
+            headers["x-warp-client-version"] = "v0.2025.09.10.08.11.stable_01"
+            headers["x-warp-os-category"] = "Windows"
+            headers["x-warp-os-name"] = "Windows"
+            headers["x-warp-os-version"] = "10 (19045)"
+            headers["X-warp-experiment-id"] = str(uuid.uuid4())
             
             print("📊 获取账户额度信息...")
             
@@ -996,44 +1003,49 @@ class ProxyRegistration:
                     print(f"❌ GraphQL错误: {error_msg}")
                     return {"success": False, "error": error_msg}
                 
-                # 按照正确的嵌套结构解析：data.user.user.requestLimitInfo
+                # 解析响应：data.user.user
                 data_result = result.get("data", {})
                 user_data = data_result.get("user", {})
                 
                 if user_data.get("__typename") == "UserOutput":
                     user_info = user_data.get("user", {})
-                    limit_info = user_info.get("requestLimitInfo", {})
+                    billing_metadata = user_info.get("billingMetadata")
+                    profile = user_info.get("profile", {})
                     
-                    if limit_info:
-                        request_limit = limit_info.get("requestLimit")
-                        requests_used = limit_info.get("requestsUsedSinceLastRefresh", 0)
-                        next_refresh = limit_info.get("nextRefreshTime")
-                        is_unlimited = limit_info.get("isUnlimited", False)
-                        
-                        remaining = request_limit - requests_used if request_limit else None
-                        
-                        print(f"✅ 账户额度信息:")
-                        print(f"   📊 总额度: {request_limit}")
-                        print(f"   📉 已使用: {requests_used}")
-                        print(f"   📍 剩余额度: {remaining if remaining is not None else 'N/A'}")
-                        print(f"   ♻️  下次刷新: {next_refresh}")
-                        print(f"   ♾️  无限额度: {is_unlimited}")
-                        
-                        return {
-                            "success": True,
-                            "requestLimit": request_limit,
-                            "requestsUsed": requests_used,
-                            "requestsRemaining": remaining,
-                            "nextRefreshTime": next_refresh,
-                            "isUnlimited": is_unlimited
-                        }
+                    # 根据 billingMetadata 判断额度
+                    # billingMetadata 为 null → 150 额度
+                    # billingMetadata 不为 null → 2500 额度
+                    if billing_metadata is None:
+                        request_limit = 150
+                        quota_type = "📋 普通额度"
+                    else:
+                        request_limit = 2500
+                        quota_type = "🎉 高额度"
+                    
+                    email = profile.get("email", "N/A")
+                    uid = profile.get("uid", "N/A")
+                    
+                    print(f"✅ 账户额度信息:")
+                    print(f"   📧 邮箱: {email}")
+                    print(f"   🎯 UID: {uid}")
+                    print(f"   {quota_type}: {request_limit}")
+                    print(f"   📊 billingMetadata: {'null' if billing_metadata is None else 'exists'}")
+                    
+                    return {
+                        "success": True,
+                        "requestLimit": request_limit,
+                        "quotaType": "high" if request_limit == 2500 else "normal",
+                        "email": email,
+                        "uid": uid,
+                        "hasBillingMetadata": billing_metadata is not None
+                    }
                 elif user_data.get("__typename") == "UserFacingError":
                     error = user_data.get("error", {}).get("message", "Unknown error")
                     print(f"❌ 获取额度失败: {error}")
                     return {"success": False, "error": error}
                 else:
-                    print(f"❌ 响应中没有找到额度信息")
-                    return {"success": False, "error": "未找到额度信息"}
+                    print(f"❌ 响应中没有找到用户信息")
+                    return {"success": False, "error": "未找到用户信息"}
             else:
                 error_text = response.text[:500]
                 print(f"❌ HTTP错误 {response.status_code}")

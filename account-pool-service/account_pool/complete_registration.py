@@ -237,10 +237,10 @@ class CompleteScriptRegistration:
             print(f"   API Key: {config.MOEMAIL_API_KEY}")
             print(f"   请求数据: {request_payload}")
             
-            # 准备请求头
+            # 准备请求头 - 使用 EMAIL_LIST_TOKEN
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": config.MOEMAIL_API_KEY  # 直接使用API密钥
+                "Authorization": config.MOEMAIL_EMAIL_LIST_TOKEN  # 使用 emailList 的 token
             }
             
             print(f"   Authorization头: {headers['Authorization']}")
@@ -319,10 +319,10 @@ class CompleteScriptRegistration:
                 "list": [user_data]
             }
             
-            # 准备请求头
+            # 准备请求头 - 使用 EMAIL_LIST_TOKEN
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": config.MOEMAIL_API_KEY  # 直接使用API密钥
+                "Authorization": config.MOEMAIL_EMAIL_LIST_TOKEN  # 使用 emailList 的 token
             }
             
             # 发送请求

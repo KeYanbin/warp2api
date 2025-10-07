@@ -391,7 +391,7 @@ async def create_email_users(request: CreateUsersRequest):
                 response = client.session.post(
                     f"{client.base_url}/api/public/addUser",
                     json={"list": [user_data]},
-                    headers={"Authorization": config.MOEMAIL_API_KEY}  # 直接使用API密钥
+                    headers={"Authorization": config.MOEMAIL_EMAIL_LIST_TOKEN}  # 使用 emailList 的 token
                 )
                 response.raise_for_status()
                 result = response.json()
