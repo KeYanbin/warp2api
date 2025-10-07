@@ -477,14 +477,14 @@ class ProxyRegistration:
         chrome_build = random.randint(6000, 6999)
         chrome_patch = random.randint(100, 999)
         chrome_version = f"{chrome_major}.{chrome_minor}.{chrome_build}.{chrome_patch}"
-        
+
         # 随机WebKit版本
         webkit_version = f"537.{random.randint(30, 40)}"
-        
+
         # 随机操作系统版本
         os_versions = ["10_15_7", "11_0_1", "12_0_1", "13_0_1", "14_0_0"]
         os_version = random.choice(os_versions)
-        
+
         # 随机语言偏好
         languages = [
             "en-US,en;q=0.9",
@@ -492,9 +492,13 @@ class ProxyRegistration:
             "en-US,en;q=0.9,fr;q=0.8",
         ]
         accept_language = random.choice(languages)
-        
+
         user_agent = f"Mozilla/5.0 (Macintosh; Intel Mac OS X {os_version}) AppleWebKit/{webkit_version} (KHTML, like Gecko) Chrome/{chrome_version} Safari/{webkit_version}"
-        
+
+        # 生成随机的 experiment-id (UUID v4 格式)
+        import uuid
+        experiment_id = str(uuid.uuid4())
+
         return {
             'Content-Type': 'application/json',
             'User-Agent': user_agent,
@@ -509,7 +513,8 @@ class ProxyRegistration:
             'Referer': 'https://app.warp.dev/',
             'Sec-Ch-Ua': f'"Chromium";v="{chrome_major}", "Google Chrome";v="{chrome_major}", "Not=A?Brand";v="99"',
             'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"macOS"'
+            'Sec-Ch-Ua-Platform': '"macOS"',
+            'X-Warp-Experiment-Id': experiment_id
         }
     
     def _generate_random_email_prefix(self) -> str:
@@ -965,9 +970,10 @@ class ProxyRegistration:
             
             headers = self._generate_random_headers()
             headers["Authorization"] = f"Bearer {id_token}"
-            headers["X-warp-client-version"] = "v0.2025.08.27.08.11.stable_04"
-            headers["X-warp-os-category"] = "Desktop"
-            headers["X-warp-manager-request"] = "true"
+            headers["X-Warp-Client-Version"] = "v0.2025.09.03.08.11.stable_03"
+            headers["X-Warp-Os-Category"] = "Windows"
+            headers["X-Warp-Os-Name"] = "Windows"
+            headers["X-Warp-Os-Version"] = "10 (19045)"
             
             print("📊 获取账户额度信息...")
             
