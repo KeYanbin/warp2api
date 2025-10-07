@@ -137,3 +137,6 @@ venv.bak/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+account-pool-service/WARP_API_USAGE.md
+
+.spec-workflow/

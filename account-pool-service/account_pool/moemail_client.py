@@ -192,14 +192,22 @@ class MoeMailClient:
             if send_name:
                 data["sendName"] = send_name
             
-            # 准备请求头（使用config.py中的MOEMAIL_API_KEY）
-            from config import config
+            # 准备请求头（使用 emailList 专用的 token）
+            # 注意: emailList 需要的是登录 token，不是 addUser 的 API 密钥
+            try:
+                from config import config
+                email_list_token = config.MOEMAIL_EMAIL_LIST_TOKEN
+            except:
+                # 如果无法导入，使用默认 token
+                email_list_token = "34c05d35-6db7-4c17-b9e7-829f17e4f76f"
+            
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": config.MOEMAIL_API_KEY  # 直接使用API密钥，不加Bearer前缀
+                "Authorization": email_list_token  # 使用 emailList 专用 token
             }
             
             print(f"📧 使用emailList接口获取邮件: {to_email} (限制: {limit}条)")
+            print(f"🔑 使用 token: {email_list_token}")
             
             # 发送 POST 请求
             response = self.session.post(

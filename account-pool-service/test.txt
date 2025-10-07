@@ -1,0 +1,398 @@
+// deno run --allow-net server.ts
+
+import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
+
+const VENICE_URL = "https://outerface.venice.ai/api/inference/chat";
+
+// 设置API密钥
+const API_KEY = "your-api-key-here";
+
+// Cloudflare优选IP配置
+const CF_IP_API_URL = "https://ipdb.api.030101.xyz/?type=cfv4;proxy";
+const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
+const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
+
+// 存储获取到的IP列表
+let cfIps: string[] = [];
+
+// 随机User-Agent列表
+const USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/121.0",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
+];
+
+// 获取随机User-Agent
+function getRandomUserAgent(): string {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+// 函数：从API获取并更新IP列表
+async function fetchAndUpdateCfIps() {
+  try {
+    console.log("正在从API获取最新的Cloudflare优选IP列表...");
+    const response = await fetch(CF_IP_API_URL);
+    if (!response.ok) {
+      throw new Error(`API请求失败: ${response.status}`);
+    }
+    const text = await response.text();
+    cfIps = text.split('\n').filter(ip => ip.trim() !== '');
+    console.log(`成功获取 ${cfIps.length} 个优选IP。`);
+    if (cfIps.length === 0) {
+      console.error("警告：获取到的IP列表为空，请检查API或网络连接。");
+    }
+  } catch (error) {
+    console.error("获取优选IP列表时出错:", error);
+    // 如果获取失败，保留旧列表，避免服务中断
+  }
+}
+
+// 函数：随机获取一个IP和端口
+function getRandomCfEndpoint(url: string): { ip: string; port: number } | null {
+  if (cfIps.length === 0) {
+    console.error("优选IP列表为空，无法创建连接。");
+    return null;
+  }
+  const randomIp = cfIps[Math.floor(Math.random() * cfIps.length)];
+  
+  // 根据目标URL的协议选择端口
+  const isHttps = url.startsWith("https://");
+  const ports = isHttps ? CF_HTTPS_PORTS : CF_HTTP_PORTS;
+  const randomPort = ports[Math.floor(Math.random() * ports.length)];
+
+  return { ip: randomIp, port: randomPort };
+}
+
+// 封装了直接IP访问的fetch函数
+async function fetchWithDirectIp(url: string, options: RequestInit = {}): Promise<Response> {
+  const endpoint = getRandomCfEndpoint(url);
+  if (!endpoint) {
+    throw new Error("无法获取可用的Cloudflare IP端点。");
+  }
+
+  const { ip, port } = endpoint;
+  console.log(`使用优选IP: ${ip}:${port} 请求: ${url}`);
+
+  // 创建一个自定义的HttpClient，通过connect回调直接连接到指定IP
+  const client = Deno.createHttpClient({
+    // 关键部分：自定义连接逻辑
+    connect: {
+      hostname: ip, // 连接到优选IP
+      port: port,   // 连接到优选端口
+    },
+  });
+
+  try {
+    // 使用这个client发起请求
+    // fetch会自动将原始URL中的hostname作为Host头发送
+    const response = await fetch(url, { ...options, client });
+    return response;
+  } finally {
+    // 务必关闭client以释放资源
+    client.close();
+  }
+}
+
+function openaiModels() {
+  return {
+    object: "list",
+    data: [
+      {
+        id: "dolphin-3.0-mistral-24b-1dot1",
+        object: "model",
+        created: 1690000000,
+        owned_by: "venice.ai",
+      },
+      {
+        id: "mistral-31-24b",
+        object: "model",
+        created: 1690000001,
+        owned_by: "venice.ai",
+      },
+    ],
+  };
+}
+
+function validateApiKey(req: Request): boolean {
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader) return false;
+  
+  const match = authHeader.match(/^Bearer\s+(.+)$/);
+  if (!match) return false;
+  
+  const providedKey = match[1];
+  return providedKey === API_KEY;
+}
+
+async function handleChatCompletions(req: Request): Promise<Response> {
+  const body = await req.json();
+  const model = body.model ?? "dolphin-3.0-mistral-24b-1dot1";
+  const messages = body.messages ?? [];
+  const temperature = body.temperature ?? 0.7;
+  const topP = body.top_p ?? 0.9;
+  const stream = body.stream ?? false;
+
+  const venicePayload = {
+    characterId: "",
+    clientProcessingTime: 2,
+    conversationType: "text",
+    includeVeniceSystemPrompt: true,
+    isCharacter: false,
+    modelId: model,
+    prompt: messages,
+    reasoning: true,
+    requestId: crypto.randomUUID().slice(0, 8),
+    systemPrompt: "",
+    temperature,
+    topP,
+    userId: "user_anon_proxy",
+    webEnabled: true,
+  };
+
+  const headers = {
+    "Content-Type": "application/json",
+    "Origin": "https://venice.ai",
+    "Referer": "https://venice.ai/",
+    "User-Agent": getRandomUserAgent(),
+  };
+
+  if (stream) {
+    try {
+      // 使用我们封装的fetchWithDirectIp替代原来的fetch
+      const veniceResp = await fetchWithDirectIp(VENICE_URL, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(venicePayload),
+      });
+
+      if (!veniceResp.ok) {
+        throw new Error(`Venice API error: ${veniceResp.status} ${veniceResp.statusText}`);
+      }
+
+      const reader = veniceResp.body?.getReader();
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let isFinished = false;
+
+      const streamResp = new ReadableStream({
+        async start(controller) {
+          // 设置超时处理
+          const timeoutId = setTimeout(() => {
+            if (!isFinished) {
+              console.error("Stream timeout, closing connection");
+              controller.close();
+            }
+          }, 60000); // 60秒超时
+
+          try {
+            while (!isFinished) {
+              if (!reader) {
+                controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                controller.close();
+                isFinished = true;
+                break;
+              }
+
+              const { done, value } = await reader.read();
+              
+              if (done) {
+                controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                controller.close();
+                isFinished = true;
+                break;
+              }
+
+              // 解码数据并处理
+              const chunk = decoder.decode(value, { stream: true });
+              buffer += chunk;
+
+              // 处理完整的行
+              let idx;
+              while ((idx = buffer.indexOf("\n")) >= 0) {
+                const line = buffer.slice(0, idx).trim();
+                buffer = buffer.slice(idx + 1);
+                
+                if (!line) continue;
+                
+                try {
+                  const data = JSON.parse(line);
+                  const content = data.content;
+                  
+                  if (content) {
+                    const chunk = {
+                      id: `chatcmpl-${crypto.randomUUID().slice(0, 8)}`,
+                      object: "chat.completion.chunk",
+                      created: Math.floor(Date.now() / 1000),
+                      model,
+                      choices: [
+                        {
+                          delta: { content },
+                          index: 0,
+                          finish_reason: null,
+                        },
+                      ],
+                    };
+                    controller.enqueue(
+                      encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`),
+                    );
+                  }
+                } catch (parseError) {
+                  console.error("JSON parse error:", parseError, "Line:", line);
+                  // 继续处理下一行，不中断流
+                }
+              }
+            }
+          } catch (error) {
+            console.error("Stream processing error:", error);
+            // 发送错误信息并关闭流
+            const errorChunk = {
+              id: `chatcmpl-${crypto.randomUUID().slice(0, 8)}`,
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model,
+              choices: [
+                {
+                  delta: { content: "\n\n[Stream interrupted due to error]" },
+                  index: 0,
+                  finish_reason: "error",
+                },
+              ],
+            };
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(errorChunk)}\n\n`),
+            );
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          } finally {
+            clearTimeout(timeoutId);
+            isFinished = true;
+          }
+        },
+      });
+
+      return new Response(streamResp, {
+        headers: { 
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+        },
+      });
+    } catch (error) {
+      console.error("Stream setup error:", error);
+      return new Response(JSON.stringify({
+        error: {
+          message: "Failed to establish stream",
+          type: "stream_error"
+        }
+      }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  } else {
+    try {
+      // 使用我们封装的fetchWithDirectIp替代原来的fetch
+      const veniceResp = await fetchWithDirectIp(VENICE_URL, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(venicePayload),
+      });
+      
+      if (!veniceResp.ok) {
+        throw new Error(`Venice API error: ${veniceResp.status} ${veniceResp.statusText}`);
+      }
+      
+      const text = await veniceResp.text();
+      const contents = text.split("\n")
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l).content)
+        .join("");
+
+      const resp = {
+        id: `chatcmpl-${crypto.randomUUID().slice(0, 8)}`,
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: contents },
+            finish_reason: "stop",
+          },
+        ],
+      };
+      return new Response(JSON.stringify(resp), {
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (error) {
+      console.error("Non-stream request error:", error);
+      return new Response(JSON.stringify({
+        error: {
+          message: "Request failed",
+          type: "request_error"
+        }
+      }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
+}
+
+// 启动服务器前先获取IP列表
+async function initializeServer() {
+  await fetchAndUpdateCfIps();
+  
+  // 如果初始获取失败，并且列表为空，则阻止启动
+  if (cfIps.length === 0) {
+    console.error("无法获取任何优选IP，服务将启动但可能无法正常工作。");
+  }
+
+  // 设置定时任务，每5分钟更新一次IP列表，保持列表新鲜
+  setInterval(fetchAndUpdateCfIps, 5 * 60 * 1000);
+
+  console.log("服务器已启动，监听端口7860...");
+  
+  serve(async (req: Request) => {
+    const url = new URL(req.url);
+
+    // 对API端点进行密钥验证
+    if (url.pathname === "/v1/models" || url.pathname === "/v1/chat/completions") {
+      if (!validateApiKey(req)) {
+        return new Response(JSON.stringify({
+          error: {
+            message: "Invalid API key",
+            type: "invalid_request_error",
+            code: "invalid_api_key"
+          }
+        }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    if (url.pathname === "/v1/models") {
+      return new Response(JSON.stringify(openaiModels()), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
+      return await handleChatCompletions(req);
+    }
+
+    return new Response("Not Found", { status: 404 });
+  }, { port: 7860 });
+}
+
+// 启动服务器
+initializeServer();

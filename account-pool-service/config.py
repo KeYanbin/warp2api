@@ -30,7 +30,8 @@ class Config:
     
     # 邮箱服务配置（真实可用）
     MOEMAIL_URL = os.getenv("MOEMAIL_URL", "https://rsgdfb.filegear-sg.me")
-    MOEMAIL_API_KEY = os.getenv("MOEMAIL_API_KEY", "3055f451-d038-4e2d-ab70-6b824b2e16a1")
+    MOEMAIL_API_KEY = os.getenv("MOEMAIL_API_KEY", "3055f451-d038-4e2d-ab70-6b824b2e16a1")  # addUser 接口用
+    MOEMAIL_EMAIL_LIST_TOKEN = os.getenv("MOEMAIL_EMAIL_LIST_TOKEN", "34c05d35-6db7-4c17-b9e7-829f17e4f76f")  # emailList 接口用
     EMAIL_EXPIRY_HOURS = int(os.getenv("EMAIL_EXPIRY_HOURS", 1))
     EMAIL_PREFIX = os.getenv("EMAIL_PREFIX", "zB3w3SQB")
     

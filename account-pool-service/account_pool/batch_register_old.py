@@ -800,10 +800,16 @@ class BatchRegister:
             }
             """
             
+            # 生成一个随机的 sessionId（UUID 格式）
+            import uuid
+            session_id = str(uuid.uuid4())
+            
             data = {
                 "operationName": "GetOrCreateUser",
                 "variables": {
-                    "input": {},
+                    "input": {
+                        "sessionId": session_id
+                    },
                     "requestContext": {
                         "osContext": {},
                         "clientContext": {}
@@ -913,6 +919,119 @@ class BatchRegister:
                 "success": False,
                 "error": f"激活异常: {str(e)[:100]}..."
             }
+    
+    def _get_request_limit(self, id_token: str, thread_id: int = None) -> Dict[str, Any]:
+        """获取账户请求额度"""
+        if not thread_id:
+            thread_id = threading.get_ident()
+            
+        if not id_token:
+            return {"success": False, "error": "缺少Firebase ID Token"}
+            
+        try:
+            url = "https://app.warp.dev/graphql/v2"
+            
+            query = """
+            query GetUser($requestContext: RequestContext!) {
+              user(requestContext: $requestContext) {
+                __typename
+                ... on UserOutput {
+                  user {
+                    requestLimitInfo {
+                      requestLimit
+                      requestsUsedSinceLastRefresh
+                      nextRefreshTime
+                      isUnlimited
+                    }
+                  }
+                }
+                ... on UserFacingError {
+                  error {
+                    message
+                  }
+                }
+              }
+            }
+            """
+            
+            import platform
+            os_name = platform.system()
+            os_version = platform.release()
+            os_category = "Desktop"
+            
+            data = {
+                "operationName": "GetUser",
+                "variables": {
+                    "requestContext": {
+                        "clientContext": {
+                            "version": "v0.2025.08.27.08.11.stable_04"
+                        },
+                        "osContext": {
+                            "category": os_category,
+                            "linuxKernelVersion": None,
+                            "name": os_name,
+                            "version": os_version
+                        }
+                    }
+                },
+                "query": query
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {id_token}",
+                "User-Agent": self._generate_warp_user_agent(),
+                "X-warp-client-version": "v0.2025.08.27.08.11.stable_04",
+                "X-warp-os-category": "Desktop",
+                "X-warp-manager-request": "true"
+            }
+            
+            print(f"  📊 [线程{thread_id}] 获取账户额度信息...")
+            
+            session = self._get_thread_session()
+            response = session.post(
+                url,
+                params={"op": "GetUser"},
+                json=data,
+                headers=headers,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                if "errors" in result:
+                    error_msg = result["errors"][0].get("message", "Unknown error")
+                    return {"success": False, "error": error_msg}
+                
+                data_result = result.get("data", {})
+                user_data = data_result.get("user", {})
+                
+                if user_data.get("__typename") == "UserOutput":
+                    user_info = user_data.get("user", {})
+                    limit_info = user_info.get("requestLimitInfo", {})
+                    
+                    if limit_info:
+                        request_limit = limit_info.get("requestLimit")
+                        requests_used = limit_info.get("requestsUsedSinceLastRefresh", 0)
+                        
+                        print(f"  ✅ [线程{thread_id}] 账户额度: {request_limit} (已用: {requests_used})")
+                        
+                        return {
+                            "success": True,
+                            "requestLimit": request_limit,
+                            "requestsUsed": requests_used
+                        }
+                elif user_data.get("__typename") == "UserFacingError":
+                    error = user_data.get("error", {}).get("message", "Unknown error")
+                    return {"success": False, "error": error}
+                else:
+                    return {"success": False, "error": "未找到额度信息"}
+            else:
+                return {"success": False, "error": f"HTTP {response.status_code}"}
+                
+        except Exception as e:
+            return {"success": False, "error": str(e)}
     
     def _generate_warp_user_agent(self) -> str:
         """生成Warp专用的User-Agent"""

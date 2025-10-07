@@ -33,11 +33,11 @@ except ImportError:
 class BatchRegister:
     """使用warpzhuce完整逻辑的批量注册器"""
     
-    def __init__(self, max_workers: int = 2):
+    def __init__(self, max_workers: int = 20):
         """初始化注册器
-        
+
         Args:
-            max_workers: 最大并发工作线程数
+            max_workers: 最大并发工作线程数（建议值：3-10）
         """
         self.max_workers = max_workers
         self.db = get_database()
@@ -72,6 +72,8 @@ class BatchRegister:
         results = []
         failed_count = 0
         success_count = 0
+        high_quota_count = 0  # 统计2500额度账号
+        normal_quota_count = 0  # 统计150额度账号
         
         # 使用线程池进行并发注册
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -91,7 +93,18 @@ class BatchRegister:
                     
                     if result['success']:
                         success_count += 1
-                        print(f"✅ 账号 #{result['index']} 注册成功: {result.get('email', 'N/A')}")
+                        email = result.get('email', 'N/A')
+                        limit = result.get('request_limit', 'N/A')
+                        
+                        # 统计额度类型
+                        if limit == 2500:
+                            high_quota_count += 1
+                            print(f"✅ 账号 #{result['index']} 注册成功: {email} (🎉 高额度: {limit})")
+                        elif limit == 150:
+                            normal_quota_count += 1
+                            print(f"✅ 账号 #{result['index']} 注册成功: {email} (📊 普通额度: {limit})")
+                        else:
+                            print(f"✅ 账号 #{result['index']} 注册成功: {email} (📊 额度: {limit})")
                     else:
                         failed_count += 1
                         print(f"❌ 账号 #{result['index']} 注册失败: {result.get('error', 'Unknown')}")
@@ -111,6 +124,12 @@ class BatchRegister:
         print(f"   ✅ 成功: {success_count} 个")
         print(f"   ❌ 失败: {failed_count} 个")
         print(f"   📁 总计: {len(results)} 个")
+        print(f"\n🎯 额度统计:")
+        print(f"   🎉 高额度(2500): {high_quota_count} 个")
+        print(f"   📊 普通额度(150): {normal_quota_count} 个")
+        if high_quota_count > 0:
+            percentage = (high_quota_count / success_count * 100) if success_count > 0 else 0
+            print(f"   📈 高额度比例: {percentage:.1f}%")
         
         return results
 
@@ -124,6 +143,7 @@ class BatchRegister:
             return {"success": False, "error": "缺少Firebase ID Token"}
             
         try:
+            import uuid
             url = "https://app.warp.dev/graphql/v2"
             
             query = """
@@ -146,10 +166,15 @@ class BatchRegister:
             }
             """
             
+            # 生成一个随机的 sessionId（UUID 格式）
+            session_id = str(uuid.uuid4())
+            
             data = {
                 "operationName": "GetOrCreateUser",
                 "variables": {
-                    "input": {},
+                    "input": {
+                        "sessionId": session_id
+                    },
                     "requestContext": {
                         "osContext": {},
                         "clientContext": {}
@@ -196,10 +221,154 @@ class BatchRegister:
             else:
                 error_text = response.text[:500]
                 print(f"❌ Warp激活HTTP错误 {response.status_code}")
-                return {"success": False, "error": f"HTTP {response.status_code}"}
+                print(f"📄 错误响应内容: {error_text}")
+                try:
+                    error_json = response.json()
+                    print(f"📋 JSON错误: {error_json}")
+                except:
+                    pass
+                return {"success": False, "error": f"HTTP {response.status_code}: {error_text}"}
                 
         except Exception as e:
             print(f"❌ Warp激活错误: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _get_request_limit(self, id_token: str) -> Dict[str, Any]:
+        """获取账户请求额度
+        
+        调用 GetRequestLimitInfo 接口获取账户的使用限制信息
+        
+        Args:
+            id_token: Firebase ID Token
+            
+        Returns:
+            包含额度信息的字典
+        """
+        if not id_token:
+            return {"success": False, "error": "缺少Firebase ID Token"}
+            
+        try:
+            url = "https://app.warp.dev/graphql/v2"
+            
+            # 正确的查询结构：通过 user.requestLimitInfo 嵌套获取
+            query = """
+            query GetUser($requestContext: RequestContext!) {
+              user(requestContext: $requestContext) {
+                __typename
+                ... on UserOutput {
+                  user {
+                    requestLimitInfo {
+                      requestLimit
+                      requestsUsedSinceLastRefresh
+                      nextRefreshTime
+                      isUnlimited
+                    }
+                  }
+                }
+                ... on UserFacingError {
+                  error {
+                    message
+                  }
+                }
+              }
+            }
+            """
+            
+            # 获取 OS 信息
+            import platform
+            os_name = platform.system()
+            os_version = platform.release()
+            os_category = "Desktop"
+            
+            data = {
+                "operationName": "GetUser",
+                "variables": {
+                    "requestContext": {
+                        "clientContext": {
+                            "version": "v0.2025.08.27.08.11.stable_04"
+                        },
+                        "osContext": {
+                            "category": os_category,
+                            "linuxKernelVersion": None,
+                            "name": os_name,
+                            "version": os_version
+                        }
+                    }
+                },
+                "query": query
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {id_token}",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "X-warp-client-version": "v0.2025.08.27.08.11.stable_04",
+                "X-warp-os-category": "Desktop",
+                "X-warp-manager-request": "true"
+            }
+            
+            print("📊 获取账户额度信息...")
+            
+            response = requests.post(
+                url,
+                params={"op": "GetUser"},
+                json=data,
+                headers=headers,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                # 检查是否有错误
+                if "errors" in result:
+                    error_msg = result["errors"][0].get("message", "Unknown error")
+                    print(f"❌ GraphQL错误: {error_msg}")
+                    return {"success": False, "error": error_msg}
+                
+                # 按照正确的嵌套结构解析：data.user.user.requestLimitInfo
+                data_result = result.get("data", {})
+                user_data = data_result.get("user", {})
+                
+                if user_data.get("__typename") == "UserOutput":
+                    user_info = user_data.get("user", {})
+                    limit_info = user_info.get("requestLimitInfo", {})
+                    
+                    if limit_info:
+                        request_limit = limit_info.get("requestLimit")
+                        requests_used = limit_info.get("requestsUsedSinceLastRefresh", 0)
+                        next_refresh = limit_info.get("nextRefreshTime")
+                        is_unlimited = limit_info.get("isUnlimited", False)
+                        
+                        print(f"✅ 账户额度信息:")
+                        print(f"   📊 总额度: {request_limit}")
+                        print(f"   📉 已使用: {requests_used}")
+                        print(f"   📍 剩余额度: {request_limit - requests_used if request_limit else 'N/A'}")
+                        print(f"   ♻️  下次刷新: {next_refresh}")
+                        print(f"   ♾️  无限额度: {is_unlimited}")
+                        
+                        return {
+                            "success": True,
+                            "requestLimit": request_limit,
+                            "requestsUsed": requests_used,
+                            "requestsRemaining": request_limit - requests_used if request_limit else None,
+                            "nextRefreshTime": next_refresh,
+                            "isUnlimited": is_unlimited
+                        }
+                elif user_data.get("__typename") == "UserFacingError":
+                    error = user_data.get("error", {}).get("message", "Unknown error")
+                    print(f"❌ 获取额度失败: {error}")
+                    return {"success": False, "error": error}
+                else:
+                    print(f"❌ 响应中没有找到额度信息")
+                    return {"success": False, "error": "未找到额度信息"}
+            else:
+                error_text = response.text[:500]
+                print(f"❌ HTTP错误 {response.status_code}")
+                return {"success": False, "error": f"HTTP {response.status_code}: {error_text}"}
+                
+        except Exception as e:
+            print(f"❌ 获取额度错误: {e}")
             return {"success": False, "error": str(e)}
 
     
@@ -228,7 +397,7 @@ class BatchRegister:
                 # 激活Warp用户
                 print(f"🔄 激活Warp用户: {result['final_tokens']['email']}")
                 activation_result = self._activate_warp_user(result['final_tokens']['id_token'])
-                
+
                 if not activation_result['success']:
                     error_msg = f"Warp用户激活失败: {activation_result.get('error', '未知错误')}"
                     print(error_msg)
@@ -240,8 +409,16 @@ class BatchRegister:
                         'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
                         'duration': time.time() - start_time
                     }
-                
+
                 print(f"✅ Warp用户激活成功: {result['final_tokens']['email']}")
+                
+                # 获取账户额度信息
+                limit_info = self._get_request_limit(result['final_tokens']['id_token'])
+                request_limit = None
+                if limit_info['success']:
+                    request_limit = limit_info.get('requestLimit')
+                else:
+                    print(f"⚠️ 获取额度失败，但不影响注册: {limit_info.get('error', '未知')}")
                 
                 # 保存到数据库
                 try:
@@ -262,6 +439,7 @@ class BatchRegister:
                     'index': index,
                     'email': result['final_tokens']['email'],
                     'local_id': result['final_tokens']['local_id'],
+                    'request_limit': request_limit,
                     'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
                     'duration': time.time() - start_time
                 }
@@ -359,7 +537,7 @@ def get_batch_register() -> BatchRegister:
     """获取批量注册器单例"""
     global _batch_register_instance
     if _batch_register_instance is None:
-        _batch_register_instance = BatchRegister(max_workers=2)  # 设置为2个并发线程
+        _batch_register_instance = BatchRegister(max_workers=20)  # 并发线程数（建议3-10）
     return _batch_register_instance
 
 
